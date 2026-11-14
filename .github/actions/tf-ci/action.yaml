@@ -67,11 +67,12 @@ runs:
         exit $missing
 
     - name: Azure login (OIDC)
-      uses: azure/login@v2 # pin to a full commit SHA if your organisation policy requires it
+      uses: azure/login@v3 # pin to a full commit SHA if your organisation policy requires it
       with:
         client-id: ${{ inputs.client-id }}
         tenant-id: ${{ inputs.tenant-id }}
         subscription-id: ${{ inputs.subscription-id }}
+        
 
     - name: Configure Terraform azurerm OIDC environment
       shell: bash
