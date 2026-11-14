@@ -1,0 +1,156 @@
+name: 'Terraform Plan (Azure)'
+description: 'Authenticates to Azure via OIDC, runs terraform plan, uploads the plan artifact and posts it to the PR'
+inputs:
+  working-directory:
+    description: 'Terraform working directory, relative to the repository root'
+    required: true
+  environment:
+    description: 'Environment name (selects tfvars/<environment>.tfvars)'
+    required: true
+  client-id:
+    description: 'Client ID of the identity to log in with (OIDC federated credential)'
+    required: true
+  tenant-id:
+    description: 'Microsoft Entra tenant ID'
+    required: true
+  subscription-id:
+    description: 'Target Azure subscription ID'
+    required: true
+  state-subscription-id:
+    description: 'Subscription ID holding the Terraform state storage account'
+    required: true
+  state-resource-group:
+    description: 'Resource group of the Terraform state storage account'
+    required: true
+  state-storage-account:
+    description: 'Terraform state storage account name'
+    required: true
+  state-container:
+    description: 'Terraform state blob container'
+    required: true
+  state-key:
+    description: 'Terraform state blob name'
+    required: true
+  terraform-version:
+    description: 'Terraform CLI version to install'
+    required: false
+    default: '1.12.2'
+runs:
+  using: "composite"
+  steps:
+    - name: Check required configuration
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        TENANT_ID: ${{ inputs.tenant-id }}
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        STATE_SUBSCRIPTION_ID: ${{ inputs.state-subscription-id }}
+        STATE_RESOURCE_GROUP: ${{ inputs.state-resource-group }}
+        STATE_STORAGE_ACCOUNT: ${{ inputs.state-storage-account }}
+        STATE_CONTAINER: ${{ inputs.state-container }}
+      run: |
+        missing=0
+        for v in CLIENT_ID TENANT_ID SUBSCRIPTION_ID STATE_SUBSCRIPTION_ID STATE_RESOURCE_GROUP STATE_STORAGE_ACCOUNT STATE_CONTAINER; do
+          if [ -z "${!v}" ]; then
+            echo "::error::Missing ${v}. Pass it as a workflow input or set the matching variable (AZURE_* / TF_STATE_*) on the '${{ inputs.environment }}' GitHub environment."
+            missing=1
+          fi
+        done
+        exit $missing
+
+    - name: Azure login (OIDC)
+      uses: azure/login@v2 # pin to a full commit SHA if your organisation policy requires it
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+
+    - name: Configure Terraform azurerm OIDC environment
+      shell: bash
+      run: |
+        {
+          echo "ARM_USE_OIDC=true"
+          echo "ARM_USE_AZUREAD=true"
+          echo "ARM_CLIENT_ID=${{ inputs.client-id }}"
+          echo "ARM_TENANT_ID=${{ inputs.tenant-id }}"
+          echo "ARM_SUBSCRIPTION_ID=${{ inputs.subscription-id }}"
+          echo "TF_IN_AUTOMATION=true"
+        } >> "$GITHUB_ENV"
+
+    - name: Install Terraform
+      shell: bash
+      working-directory: ./
+      run: |
+        chmod +x ./templates/scripts/tf-install.sh
+        TERRAFORM_VERSION="${{ inputs.terraform-version }}" \
+        make tf-install
+
+    - name: Terraform Init
+      shell: bash
+      working-directory: ./
+      run: |
+        chmod +x ./templates/scripts/tf-init.sh
+        PIPELINE_WORKSPACE="$GITHUB_WORKSPACE/${{ inputs.working-directory }}" \
+        TFSTATE_FILE="${{ inputs.state-key }}" \
+        STORAGE_ACCOUNT_NAME="${{ inputs.state-storage-account }}" \
+        CONTAINER_NAME="${{ inputs.state-container }}" \
+        STORAGE_ACCOUNT_RSG_NAME="${{ inputs.state-resource-group }}" \
+        SUBSCRIPTION_ID="${{ inputs.state-subscription-id }}" \
+        make tf-init
+
+    - name: Terraform Plan
+      shell: bash
+      working-directory: ./
+      run: |
+        chmod +x ./templates/scripts/tf-plan.sh
+        PIPELINE_WORKSPACE="$GITHUB_WORKSPACE/${{ inputs.working-directory }}" \
+        PIPELINE_ENVIRONMENT="${{ inputs.environment }}" \
+        make tf-plan
+
+    - name: Upload plan artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ${{ inputs.environment }}-plan
+        path: ${{ inputs.working-directory }}/${{ inputs.environment }}-plan
+        retention-days: 1
+
+    - name: Write plan to job summary
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        PLAN_TEXT_FILE="${{ inputs.environment }}-plan.txt"
+        {
+          echo "### Terraform Plan - \`${{ inputs.environment }}\` (${{ inputs.working-directory }})"
+          echo
+          echo '```diff'
+          head -c 60000 "$PLAN_TEXT_FILE"
+          echo
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Post plan to PR
+      if: github.event_name == 'pull_request'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        PLAN_TEXT_FILE="${{ inputs.environment }}-plan.txt"
+        MAX_CHARS=60000
+        BODY_FILE="$(mktemp)"
+
+        {
+          echo "### Terraform Plan - \`${{ inputs.environment }}\` (${{ inputs.working-directory }})"
+          echo
+          echo '```diff'
+          if [ "$(wc -c < "$PLAN_TEXT_FILE")" -gt "$MAX_CHARS" ]; then
+            head -c "$MAX_CHARS" "$PLAN_TEXT_FILE"
+            echo
+            echo "... (truncated - download the '${{ inputs.environment }}-plan' artifact for the full plan)"
+          else
+            cat "$PLAN_TEXT_FILE"
+          fi
+          echo '```'
+        } > "$BODY_FILE"
+
+        gh pr comment "${{ github.event.pull_request.number }}" --body-file "$BODY_FILE"
