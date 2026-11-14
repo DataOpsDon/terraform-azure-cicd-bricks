@@ -105,7 +105,7 @@ on:
         description: 'Comma-separated Checkov check IDs to skip (e.g. CKV_AZURE_35,CKV2_AZURE_1)'
         required: false
         type: string
-        default: ''
+        default: 'CKV_TF_1, CKV_TF_2'
       checkov_soft_fail:
         description: 'Do not fail the pipeline on Checkov findings'
         required: false

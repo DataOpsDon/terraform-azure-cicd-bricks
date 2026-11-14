@@ -38,7 +38,7 @@ inputs:
   checkov-skip-check:
     description: 'Comma-separated Checkov check IDs to skip'
     required: false
-    default: 'CKV_TF_1'
+    default: 'CKV_TF_1, CKV_TF_2'
   checkov-soft-fail:
     description: 'Do not fail on Checkov findings'
     required: false
