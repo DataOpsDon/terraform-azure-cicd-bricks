@@ -1,0 +1,238 @@
+name: Terraform Pipeline (Reusable)
+
+# -----------------------------------------------------------------------------
+# Reusable Terraform pipeline for Azure: CI -> Plan -> (approval) -> Apply.
+#
+# Consumed by stack repositories via a small caller workflow, e.g.:
+#
+#   jobs:
+#     dev:
+#       uses: dataopsdon/terraform-azure-cicd-bricks/.github/workflows/_terraform-pipeline.yml@<tag>
+#       with:
+#         working_directory: stacks/network/terraform
+#         environment: dev
+#
+# Authentication is OIDC (workload identity federation) to Azure - no client
+# secrets are stored. Every value below that identifies an Azure resource can
+# be passed as an input OR left blank, in which case it is read from the GitHub
+# *environment* variables of the job's environment in the CALLER repository:
+#
+#   Environment `<environment>`          (CI + Plan jobs - build identity)
+#     AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#     TF_STATE_SUBSCRIPTION_ID, TF_STATE_RESOURCE_GROUP,
+#     TF_STATE_STORAGE_ACCOUNT, TF_STATE_CONTAINER
+#
+#   Environment `<environment>/apply`    (Apply job - deploy identity)
+#     Same variable names; AZURE_CLIENT_ID is the deploy identity. Add
+#     required reviewers on this environment to gate applies.
+#
+# `ign bootstrap` creates the identities, their federated credentials and the
+# state storage, and prints the exact `gh variable set` commands to run.
+# -----------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Terraform working directory (e.g. stacks/network/terraform)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment name - selects tfvars/<environment>.tfvars and the GitHub environment (e.g. dev, tst, uat, prd)'
+        required: true
+        type: string
+      apply_environment:
+        description: 'GitHub environment used by the Apply job. Defaults to <environment>/apply'
+        required: false
+        type: string
+        default: ''
+      apply_on_refs:
+        description: 'JSON array of git refs that are allowed to run Terraform Apply (never runs on pull requests)'
+        required: false
+        type: string
+        default: '["refs/heads/main", "refs/heads/develop"]'
+      azure_client_id:
+        description: 'Client ID of the build (plan) identity. Falls back to vars.AZURE_CLIENT_ID'
+        required: false
+        type: string
+        default: ''
+      azure_deploy_client_id:
+        description: 'Client ID of the deploy (apply) identity. Falls back to vars.AZURE_CLIENT_ID of the apply environment'
+        required: false
+        type: string
+        default: ''
+      azure_tenant_id:
+        description: 'Microsoft Entra tenant ID. Falls back to vars.AZURE_TENANT_ID'
+        required: false
+        type: string
+        default: ''
+      azure_subscription_id:
+        description: 'Target subscription ID. Falls back to vars.AZURE_SUBSCRIPTION_ID'
+        required: false
+        type: string
+        default: ''
+      state_subscription_id:
+        description: 'Subscription ID holding the Terraform state storage account. Falls back to vars.TF_STATE_SUBSCRIPTION_ID'
+        required: false
+        type: string
+        default: ''
+      state_resource_group:
+        description: 'Resource group of the Terraform state storage account. Falls back to vars.TF_STATE_RESOURCE_GROUP'
+        required: false
+        type: string
+        default: ''
+      state_storage_account:
+        description: 'Terraform state storage account name. Falls back to vars.TF_STATE_STORAGE_ACCOUNT'
+        required: false
+        type: string
+        default: ''
+      state_container:
+        description: 'Terraform state blob container. Falls back to vars.TF_STATE_CONTAINER'
+        required: false
+        type: string
+        default: ''
+      state_key:
+        description: 'Terraform state blob name. Defaults to <working_directory>/<environment>.tfstate'
+        required: false
+        type: string
+        default: ''
+      terraform_version:
+        description: 'Terraform CLI version to install'
+        required: false
+        type: string
+        default: '1.12.2'
+      checkov_skip_check:
+        description: 'Comma-separated Checkov check IDs to skip (e.g. CKV_AZURE_35,CKV2_AZURE_1)'
+        required: false
+        type: string
+        default: ''
+      checkov_soft_fail:
+        description: 'Do not fail the pipeline on Checkov findings'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      module_repo_pat:
+        description: 'Optional token with read access to private Terraform module repositories (used by `terraform init` git clones)'
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  actions: read
+  security-events: write
+
+# One Terraform run per stack + environment at a time (avoids state lock fights).
+concurrency:
+  group: terraform-${{ inputs.working_directory }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+# NOTE: the `uses:` lines below reference this repository's own composite
+# actions by owner/repo/path@ref. GitHub resolves those internally (subject to
+# Settings > Actions > General > Access on this repo), so no checkout of this
+# repo or cross-repo token is needed. `uses:` cannot take an expression, so the
+# ref is a literal. If your organisation requires full-length commit SHAs, pin
+# it to the SHA of a release tag and bump it when the actions change.
+jobs:
+  Terraform-CI:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Configure git auth for private module repos
+        env:
+          MODULE_REPO_PAT: ${{ secrets.module_repo_pat }}
+        shell: bash
+        run: |
+          if [ -n "$MODULE_REPO_PAT" ]; then
+            git config --global url."https://x-access-token:${MODULE_REPO_PAT}@github.com".insteadOf "https://github.com"
+          else
+            echo "No module_repo_pat supplied - skipping private module auth."
+          fi
+
+      - name: Terraform CI
+        uses: dataopsdon/terraform-azure-cicd-bricks/.github/actions/tf-ci@main
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          environment: ${{ inputs.environment }}
+          client-id: ${{ inputs.azure_client_id || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || vars.AZURE_SUBSCRIPTION_ID }}
+          state-subscription-id: ${{ inputs.state_subscription_id || vars.TF_STATE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ inputs.state_resource_group || vars.TF_STATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ inputs.state_storage_account || vars.TF_STATE_STORAGE_ACCOUNT }}
+          state-container: ${{ inputs.state_container || vars.TF_STATE_CONTAINER }}
+          state-key: ${{ inputs.state_key || format('{0}/{1}.tfstate', inputs.working_directory, inputs.environment) }}
+          terraform-version: ${{ inputs.terraform_version }}
+          checkov-skip-check: ${{ inputs.checkov_skip_check }}
+          checkov-soft-fail: ${{ inputs.checkov_soft_fail }}
+
+  Terraform-Plan:
+    needs: Terraform-CI
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Configure git auth for private module repos
+        env:
+          MODULE_REPO_PAT: ${{ secrets.module_repo_pat }}
+        shell: bash
+        run: |
+          if [ -n "$MODULE_REPO_PAT" ]; then
+            git config --global url."https://x-access-token:${MODULE_REPO_PAT}@github.com".insteadOf "https://github.com"
+          fi
+
+      - name: Terraform Plan
+        uses: dataopsdon/terraform-azure-cicd-bricks/.github/actions/tf-plan@main
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          environment: ${{ inputs.environment }}
+          client-id: ${{ inputs.azure_client_id || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || vars.AZURE_SUBSCRIPTION_ID }}
+          state-subscription-id: ${{ inputs.state_subscription_id || vars.TF_STATE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ inputs.state_resource_group || vars.TF_STATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ inputs.state_storage_account || vars.TF_STATE_STORAGE_ACCOUNT }}
+          state-container: ${{ inputs.state_container || vars.TF_STATE_CONTAINER }}
+          state-key: ${{ inputs.state_key || format('{0}/{1}.tfstate', inputs.working_directory, inputs.environment) }}
+          terraform-version: ${{ inputs.terraform_version }}
+
+  Terraform-Apply:
+    if: github.event_name != 'pull_request' && contains(fromJSON(inputs.apply_on_refs), github.ref)
+    needs: Terraform-Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Add required reviewers to this GitHub environment to gate applies.
+    environment: ${{ inputs.apply_environment || format('{0}/apply', inputs.environment) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Configure git auth for private module repos
+        env:
+          MODULE_REPO_PAT: ${{ secrets.module_repo_pat }}
+        shell: bash
+        run: |
+          if [ -n "$MODULE_REPO_PAT" ]; then
+            git config --global url."https://x-access-token:${MODULE_REPO_PAT}@github.com".insteadOf "https://github.com"
+          fi
+
+      - name: Terraform Apply
+        uses: dataopsdon/terraform-azure-cicd-bricks/.github/actions/tf-apply@main
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          environment: ${{ inputs.environment }}
+          client-id: ${{ inputs.azure_deploy_client_id || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || vars.AZURE_SUBSCRIPTION_ID }}
+          state-subscription-id: ${{ inputs.state_subscription_id || vars.TF_STATE_SUBSCRIPTION_ID }}
+          state-resource-group: ${{ inputs.state_resource_group || vars.TF_STATE_RESOURCE_GROUP }}
+          state-storage-account: ${{ inputs.state_storage_account || vars.TF_STATE_STORAGE_ACCOUNT }}
+          state-container: ${{ inputs.state_container || vars.TF_STATE_CONTAINER }}
+          state-key: ${{ inputs.state_key || format('{0}/{1}.tfstate', inputs.working_directory, inputs.environment) }}
+          terraform-version: ${{ inputs.terraform_version }}
