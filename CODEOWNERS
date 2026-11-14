@@ -1,0 +1,6 @@
+# Code owners for the shared Terraform CI/CD templates.
+# Changes here affect every consuming repository, so require maintainer review.
+# More: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# The team is created by `ign bootstrap` (createCicdRepo_gh) with the members in cicdRepoMaintainers_gh.
+*       @dataopsdon/terraform-azure-cicd-bricks-maintainers
