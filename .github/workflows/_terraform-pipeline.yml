@@ -1,6 +1,5 @@
 name: Terraform Pipeline (Reusable)
 
-
 # -----------------------------------------------------------------------------
 # Reusable Terraform pipeline for Azure: CI -> Plan -> (approval) -> Apply.
 #
@@ -137,7 +136,8 @@ concurrency:
 # it to the SHA of a release tag and bump it when the actions change.
 jobs:
   Terraform-CI:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout repository
@@ -173,8 +173,7 @@ jobs:
 
   Terraform-Plan:
     needs: Terraform-CI
-    runs-on: self-hosted
-
+    runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout repository
@@ -207,7 +206,7 @@ jobs:
   Terraform-Apply:
     if: github.event_name != 'pull_request' && contains(fromJSON(inputs.apply_on_refs), github.ref)
     needs: Terraform-Plan
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     timeout-minutes: 30
     # Add required reviewers to this GitHub environment to gate applies.
